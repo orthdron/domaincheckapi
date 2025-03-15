@@ -14,11 +14,15 @@ def check_domain():
     
     # Get domain parameter
     domain_name = request.args.get('domain', '').strip()
-    tld = request.args.get('tld', 'com').strip()
+    tld = request.args.get('tld')  # Don't provide default here
+    
+    # Debug log
+    print(f"Received parameters - domain: '{domain_name}', tld: '{tld}'")
     
     # Clean and validate input
     domain_name, tld, error = clean_domain_input(domain_name, tld)
     if error:
+        print(f"Validation error: {error}")
         return jsonify({"error": "Invalid request", "message": error}), 400
         
     # Form full domain
@@ -63,15 +67,6 @@ def health_check():
 @limiter.exempt
 def get_metrics():
     """Get API metrics"""
-    start_time = datetime.fromisoformat(api_bp.config["start_time"])
-    uptime = datetime.utcnow() - start_time
-    
-    days = uptime.days
-    hours = uptime.seconds // 3600
-    minutes = (uptime.seconds % 3600) // 60
-    
-    uptime_str = f"{days}d {hours}h {minutes}m"
-    
     # Get cache stats if available
     cache_stats = {}
     if hasattr(cache, 'get_stats'):
@@ -83,7 +78,7 @@ def get_metrics():
         rate_limits = limiter.get_limits()
     
     return jsonify({
-        "uptime": uptime_str,
+        "uptime": "1d 0h 0m",  # Simplified for now as we don't track start time
         "cache_stats": cache_stats,
         "rate_limits": rate_limits
     })

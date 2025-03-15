@@ -58,14 +58,21 @@ def clean_domain_input(domain_name: str, tld: str) -> Tuple[Optional[str], Optio
         
     # Clean inputs
     domain_name = domain_name.strip().lower()
-    tld = (tld or "com").strip().lstrip('.').lower()
+    
+    # Handle TLD
+    if tld is None:
+        tld = "com"  # Use default TLD if none provided
+    else:
+        tld = tld.strip().lstrip('.').lower()
+        if not tld:  # Empty string after cleaning
+            return None, None, "Invalid TLD format"
     
     # Validate domain name
     if not is_valid_domain_name(domain_name):
         return None, None, "Invalid domain name format"
         
-    # Validate TLD
-    if not is_valid_tld(tld):
+    # Validate TLD if not using default
+    if tld != "com" and not is_valid_tld(tld):
         return None, None, "Invalid TLD format"
         
     return domain_name, tld, None
