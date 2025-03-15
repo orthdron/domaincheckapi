@@ -1,8 +1,12 @@
 [phases.setup]
-nixPkgs = ["python39", "python39Packages.pip", "python39Packages.virtualenv"]
+nixPkgs = ['python39', 'python39Packages.pip', 'python39Packages.virtualenv']
 
 [phases.install]
-cmds = ["python -m venv /app/venv", ". /app/venv/bin/activate", "pip install -r requirements.txt"]
+cmds = [
+  'python -m venv /app/venv',
+  '. /app/venv/bin/activate',
+  'pip install --break-system-packages -r requirements.txt'
+]
 
 [start]
-cmd = "gunicorn script:app --bind 0.0.0.0:$PORT" 
+cmd = 'gunicorn script:app --bind 0.0.0.0:$PORT' 
