@@ -1,20 +1,22 @@
 #!/bin/bash
-source /app/.venv/bin/activate
-export PYTHONPATH=/app
-export FLASK_APP=script.py
-export FLASK_ENV=production
 
-# Wait for Redis if configured
-if [ ! -z "$REDIS_URL" ]; then
-    echo "Waiting for Redis..."
-    timeout 30 bash -c 'until printf "" 2>>/dev/null >>/dev/tcp/$0/$1; do sleep 1; done' $(echo $REDIS_URL | cut -d/ -f3 | tr ":" " ")
+# Check if virtual environment exists
+if [ ! -d ".venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv .venv
 fi
 
+# Activate virtual environment
+source .venv/bin/activate
+
+# Install dependencies
+echo "Installing dependencies..."
+pip install -r requirements.txt
+
+# Generate OpenAPI spec
+echo "Generating OpenAPI specification..."
+python -c "from app.docs.routes import generate_openapi_spec, save_openapi_spec; save_openapi_spec(generate_openapi_spec())"
+
 # Start the application
-exec gunicorn script:app \
-    --bind 0.0.0.0:${PORT:-3000} \
-    --workers ${GUNICORN_WORKERS:-4} \
-    --timeout ${GUNICORN_TIMEOUT:-30} \
-    --access-logfile - \
-    --error-logfile - \
-    --log-level ${LOG_LEVEL:-info} 
+echo "Starting application..."
+python wsgi.py 
