@@ -9,4 +9,7 @@ cmds = [
 ]
 
 [start]
-cmd = 'gunicorn script:app --bind 0.0.0.0:$PORT' 
+cmd = '. /app/venv/bin/activate && exec gunicorn script:app --bind 0.0.0.0:$PORT'
+
+[variables]
+PATH = "/app/venv/bin:${PATH}" 
