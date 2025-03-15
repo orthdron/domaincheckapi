@@ -1,0 +1,254 @@
+openapi: 3.0.3
+info:
+  title: Domain Check API
+  description: |
+    API for checking domain availability using WHOIS and DNS lookups.
+    Supports rate limiting and caching for optimal performance.
+  version: 1.0.0
+  contact:
+    name: Deepak Kapoor
+    url: https://github.com/orthdron/domaincheckapi
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+  - url: https://api.example.com
+    description: Production server (replace with actual URL)
+
+paths:
+  /:
+    get:
+      summary: Check domain availability
+      description: Checks if a domain is available using WHOIS and DNS lookups
+      operationId: checkDomain
+      parameters:
+        - name: domain
+          in: query
+          required: true
+          description: Domain name to check (without TLD)
+          schema:
+            type: string
+            example: "example"
+        - name: tld
+          in: query
+          required: false
+          description: Top-level domain (defaults to com)
+          schema:
+            type: string
+            default: "com"
+            example: "com"
+      responses:
+        "200":
+          description: Domain check successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainCheckResponse"
+        "400":
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /bulk:
+    post:
+      summary: Check multiple domains
+      description: Bulk check multiple domains for availability
+      operationId: checkBulkDomains
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                domains:
+                  type: array
+                  items:
+                    type: string
+                  example: ["example", "test"]
+                tld:
+                  type: string
+                  default: "com"
+                  example: "com"
+      responses:
+        "200":
+          description: Bulk domain check successful
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DomainCheckResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Check if the API is running and healthy
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy]
+                  version:
+                    type: string
+
+  /metrics:
+    get:
+      summary: Service metrics
+      description: Get service metrics including cache stats and uptime
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Metrics retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+
+components:
+  schemas:
+    DomainCheckResponse:
+      type: object
+      properties:
+        domain:
+          type: string
+          example: "example.com"
+        status:
+          type: string
+          enum: [available, taken]
+          example: "available"
+        whois:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [available, taken, error]
+            details:
+              type: object
+              additionalProperties: true
+        dns:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [available, taken, error]
+            records:
+              type: array
+              items:
+                type: string
+        tld:
+          type: string
+          example: "com"
+        response_time:
+          type: string
+          example: "0.45s"
+        cached:
+          type: boolean
+          example: false
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Invalid domain parameter"
+        message:
+          type: string
+          example: "Domain name contains invalid characters"
+
+    MetricsResponse:
+      type: object
+      properties:
+        uptime:
+          type: string
+          example: "1d 2h 34m"
+        cache_stats:
+          type: object
+          properties:
+            hits:
+              type: integer
+              example: 1234
+            misses:
+              type: integer
+              example: 567
+            size:
+              type: integer
+              example: 890
+        rate_limits:
+          type: object
+          properties:
+            current:
+              type: integer
+              example: 45
+            remaining:
+              type: integer
+              example: 55
+            reset:
+              type: string
+              format: date-time
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    RateLimitExceeded:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Optional API key for higher rate limits
+
+tags:
+  - name: Domains
+    description: Domain availability operations
+  - name: System
+    description: System health and metrics

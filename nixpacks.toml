@@ -1,0 +1,25 @@
+[phases.setup]
+nixPkgs = [
+    'python39',
+    'python39Packages.pip',
+    'python39Packages.virtualenv',
+    'gcc',
+    'python39Packages.wheel'
+]
+
+[phases.install]
+cmds = [
+    'python -m venv --system-site-packages /app/.venv',
+    '/app/.venv/bin/pip install --break-system-packages --upgrade pip setuptools wheel',
+    '/app/.venv/bin/pip install --break-system-packages -r requirements.txt'
+]
+
+[start]
+cmd = 'bash start.sh'
+
+[variables]
+FLASK_APP = "script.py"
+FLASK_ENV = "production"
+PYTHONPATH = "/app"
+PYTHONUNBUFFERED = "1"
+PORT = "3000"
