@@ -113,12 +113,61 @@ Response:
 
 ### Environment Variables
 
-| Variable             | Description                          | Default | Example |
-| -------------------- | ------------------------------------ | ------- | ------- |
-| `ENABLE_RATE_LIMITS` | Enable/disable rate limiting         | `true`  | `false` |
-| `WHOIS_TIMEOUT`      | Timeout for WHOIS queries in seconds | `5`     | `10`    |
-| `DNS_TIMEOUT`        | Timeout for DNS queries in seconds   | `3`     | `5`     |
-| `PORT`               | Port to run the server on            | `5000`  | `8080`  |
+The project includes an `example.env` file with default values and detailed comments. Copy this file to `.env` to get started:
+
+```bash
+cp example.env .env
+```
+
+Key environment variables:
+
+| Variable             | Description                          | Default      | Example                    |
+| -------------------- | ------------------------------------ | ------------ | -------------------------- |
+| `ENABLE_RATE_LIMITS` | Enable/disable rate limiting         | `true`       | `false`                    |
+| `REDIS_URL`          | Redis URL for rate limiting          | `None`       | `redis://localhost:6379/0` |
+| `CACHE_TYPE`         | Cache storage type                   | `simple`     | `redis`                    |
+| `CACHE_REDIS_URL`    | Redis URL for caching                | `None`       | `redis://localhost:6379/1` |
+| `WHOIS_TIMEOUT`      | Timeout for WHOIS queries in seconds | `5`          | `10`                       |
+| `DNS_TIMEOUT`        | Timeout for DNS queries in seconds   | `3`          | `5`                        |
+| `PORT`               | Port to run the server on            | `5000`       | `8080`                     |
+| `FLASK_ENV`          | Flask environment                    | `production` | `development`              |
+| `CACHE_TIMEOUT`      | Cache duration in seconds            | `300`        | `600`                      |
+| `MAX_BULK_DOMAINS`   | Max domains in bulk request          | `10`         | `20`                       |
+
+See `example.env` for all available options and detailed comments.
+
+### Storage Configuration
+
+#### Rate Limiting Storage
+
+The API supports two storage backends for rate limiting:
+
+1. **Redis** (Recommended for production):
+
+   - Set `REDIS_URL` to your Redis instance
+   - Example: `REDIS_URL=redis://localhost:6379/0`
+   - Provides persistent and distributed rate limiting
+
+2. **Memory** (Development only):
+   - Used when `REDIS_URL` is not set
+   - Not suitable for production
+   - Data is lost on server restart
+
+#### Cache Storage
+
+Two caching backends are available:
+
+1. **Simple** (Default):
+
+   - Set `CACHE_TYPE=simple`
+   - In-memory caching
+   - Suitable for development
+
+2. **Redis**:
+   - Set `CACHE_TYPE=redis`
+   - Set `CACHE_REDIS_URL` to your Redis instance
+   - Recommended for production
+   - Provides distributed caching
 
 ### Rate Limits (when enabled)
 

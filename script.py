@@ -15,39 +15,132 @@ import concurrent.futures
 app = Flask(__name__)
 
 # Configure rate limiting if enabled
-ENABLE_RATE_LIMITS = os.environ.get('ENABLE_RATE_LIMITS', 'true').lower() == 'true'
+ENABLE_RATE_LIMITS = os.environ.get('ENABLE_RATE_LIMITS', 'false').lower() == 'true'
 
+# Configure rate limiter storage
+REDIS_URL = os.environ.get('REDIS_URL')
 if ENABLE_RATE_LIMITS:
-    limiter = Limiter(
-        app=app,
-        key_func=get_remote_address,
-        default_limits=["100 per day", "10 per minute"]
-    )
+    if REDIS_URL:
+        limiter = Limiter(
+            app=app,
+            key_func=get_remote_address,
+            storage_uri=REDIS_URL,
+            default_limits=["100 per day", "10 per minute"]
+        )
+    else:
+        # Use memory storage with a warning in logs
+        app.logger.warning(
+            "Using in-memory storage for rate limiting. This is not recommended for production. "
+            "Set REDIS_URL environment variable to use Redis storage."
+        )
+        limiter = Limiter(
+            app=app,
+            key_func=get_remote_address,
+            storage_uri="memory://",
+            default_limits=["100 per day", "10 per minute"]
+        )
 else:
     # Create a dummy limiter that doesn't actually limit
     class DummyLimiter:
         def limit(self, *args, **kwargs):
             def decorator(f):
-                return f
+                @wraps(f)
+                def wrapped(*args, **kwargs):
+                    return f(*args, **kwargs)
+                return wrapped
             return decorator
         def exempt(self, f):
-            return f
+            @wraps(f)
+            def wrapped(*args, **kwargs):
+                return f(*args, **kwargs)
+            return wrapped
     limiter = DummyLimiter()
 
 # Configure caching
-cache = Cache(app, config={
-    'CACHE_TYPE': 'simple',
-    'CACHE_DEFAULT_TIMEOUT': 300  # Cache results for 5 minutes
-})
+CACHE_TYPE = os.environ.get('CACHE_TYPE', 'simple')
+CACHE_REDIS_URL = os.environ.get('CACHE_REDIS_URL')
+
+cache_config = {
+    'CACHE_TYPE': CACHE_TYPE,
+    'CACHE_DEFAULT_TIMEOUT': int(os.environ.get('CACHE_TIMEOUT', 300))
+}
+
+if CACHE_TYPE == 'redis' and CACHE_REDIS_URL:
+    cache_config['CACHE_REDIS_URL'] = CACHE_REDIS_URL
+
+cache = Cache(app, config=cache_config)
 
 # Timeout settings
 WHOIS_TIMEOUT = int(os.environ.get('WHOIS_TIMEOUT', 5))  # seconds
 DNS_TIMEOUT = int(os.environ.get('DNS_TIMEOUT', 3))      # seconds
 
+# Initialize application state
+app.config["start_time"] = datetime.utcnow().isoformat()
+
 def is_valid_domain_name(domain):
     """Validate domain name format."""
-    pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
-    return bool(re.match(pattern, domain))
+    if not domain or not isinstance(domain, str):
+        return False
+        
+    # Clean input
+    domain = domain.strip().lower()
+    
+    # Basic validation
+    if not domain or len(domain) > 63:
+        return False
+        
+    # Check for invalid characters first
+    if re.search(r'[^a-z0-9-]', domain):
+        return False
+        
+    # Must start and end with alphanumeric
+    if domain.startswith('-') or domain.endswith('-'):
+        return False
+        
+    # Check for consecutive hyphens
+    if '--' in domain:
+        return False
+        
+    # Final regex check for overall format
+    return bool(re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$', domain))
+
+def is_valid_tld(tld):
+    """Validate TLD format."""
+    if not tld or not isinstance(tld, str):
+        return False
+        
+    # Clean input
+    tld = tld.strip().lstrip('.').lower()
+    
+    # Basic validation
+    if not tld or len(tld) < 2:
+        return False
+        
+    # Check for invalid characters first
+    if re.search(r'[^a-z]', tld):
+        return False
+        
+    # Final regex check for overall format
+    return bool(re.match(r'^[a-z]{2,}$', tld))
+
+def clean_domain_input(domain_name, tld):
+    """Clean and validate domain input."""
+    if not domain_name:
+        return None, None, "Missing domain parameter"
+        
+    # Clean inputs
+    domain_name = domain_name.strip().lower()
+    tld = (tld or "com").strip().lstrip('.').lower()
+    
+    # Validate domain name
+    if not is_valid_domain_name(domain_name):
+        return None, None, "Invalid domain name format"
+        
+    # Validate TLD
+    if not is_valid_tld(tld):
+        return None, None, "Invalid TLD format"
+        
+    return domain_name, tld, None
 
 def with_timeout(timeout):
     """Decorator to add timeout to functions."""
@@ -103,50 +196,59 @@ def check_dns(domain):
 
 @app.route("/", methods=["GET"])
 @limiter.limit("10 per minute")
-@cache.memoize(timeout=300)
 def check_domain():
     """API Endpoint to check domain availability."""
     start_time = time.time()
     
-    domain_name = request.args.get("domain")
-    tld = request.args.get("tld", "com").lstrip(".")
-    
+    # Get domain parameter
+    domain_name = request.args.get("domain", "").strip()
     if not domain_name:
         return jsonify({"error": "Missing domain parameter"}), 400
-    
-    if not isinstance(domain_name, str):
-        return jsonify({"error": "Invalid domain parameter"}), 400
-
-    # Remove any TLD if included in the domain parameter
-    domain_name = domain_name.split('.')[0]
-
-    # Validate domain name format
+        
+    # Get and validate TLD parameter
+    tld = request.args.get("tld", "com").strip().lstrip('.').lower()
+    if not is_valid_tld(tld):
+        return jsonify({"error": "Invalid TLD format"}), 400
+        
+    # Clean and validate domain name
+    domain_name = domain_name.strip().lower()
     if not is_valid_domain_name(domain_name):
         return jsonify({"error": "Invalid domain name format"}), 400
-
-    # Validate TLD format
-    if not re.match(r'^[a-zA-Z]{2,}$', tld):
-        return jsonify({"error": "Invalid TLD format"}), 400
-
+    
+    # Generate cache key from normalized inputs
+    cache_key = f"domain_check:{domain_name}:{tld}"
+    
+    # Try to get from cache
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        cached_result['response_time'] = f"{(time.time() - start_time):.2f}s"
+        cached_result['cached'] = True
+        return jsonify(cached_result)
+    
     # Construct full domain
     full_domain = f"{domain_name}.{tld}"
-
+    
+    # Check availability
     whois_result = check_whois(full_domain)
     dns_result = check_dns(full_domain)
-
+    
     # Determine overall status
     status = "taken" if (whois_result.get("status") == "taken" or 
                         dns_result.get("status") == "taken") else "available"
-
+    
     response = {
         "domain": full_domain,
         "status": status,
         "whois": whois_result,
         "dns": dns_result,
         "tld": tld,
-        "response_time": f"{(time.time() - start_time):.2f}s"
+        "response_time": f"{(time.time() - start_time):.2f}s",
+        "cached": False
     }
-
+    
+    # Cache the response
+    cache.set(cache_key, response, timeout=300)
+    
     return jsonify(response)
 
 @app.route("/health", methods=["GET"])
@@ -157,7 +259,14 @@ def health_check():
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "version": "1.0.0",
-        "rate_limiting": ENABLE_RATE_LIMITS,
+        "rate_limiting": {
+            "enabled": ENABLE_RATE_LIMITS,
+            "storage": "redis" if REDIS_URL else "memory"
+        },
+        "cache": {
+            "type": CACHE_TYPE,
+            "timeout": cache_config['CACHE_DEFAULT_TIMEOUT']
+        },
         "timeouts": {
             "whois": f"{WHOIS_TIMEOUT}s",
             "dns": f"{DNS_TIMEOUT}s"
@@ -181,28 +290,82 @@ def metrics():
 @limiter.limit("5 per minute")
 def bulk_check():
     """Bulk domain checking endpoint."""
-    domains = request.json.get("domains", [])
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    domains = request.json.get("domains")
     if not domains or not isinstance(domains, list):
         return jsonify({"error": "Invalid or missing domains list"}), 400
     
-    if len(domains) > 10:  # Limit bulk requests to 10 domains
-        return jsonify({"error": "Too many domains. Maximum is 10 per request"}), 400
+    max_domains = int(os.environ.get('MAX_BULK_DOMAINS', 10))
+    if len(domains) > max_domains:
+        return jsonify({"error": f"Too many domains. Maximum is {max_domains} per request"}), 400
 
     results = {}
+    errors = []
+    
     for domain in domains:
-        name = domain.get("domain")
-        tld = domain.get("tld", "com")
-        if name:
-            with app.test_request_context(f"/?domain={name}&tld={tld}"):
-                results[f"{name}.{tld}"] = check_domain().json
+        if not isinstance(domain, dict):
+            errors.append(f"Invalid domain entry: {domain}")
+            continue
+            
+        name = domain.get("domain", "").strip()
+        if not name:
+            errors.append("Missing domain name")
+            continue
+            
+        tld = domain.get("tld", "com").strip().lstrip('.').lower()
+        if not is_valid_tld(tld):
+            errors.append(f"Invalid TLD: {tld}")
+            continue
+            
+        name = name.strip().lower()
+        if not is_valid_domain_name(name):
+            errors.append(f"Invalid domain name: {name}")
+            continue
 
-    return jsonify(results)
+        # Generate cache key
+        cache_key = f"domain_check:{name}:{tld}"
+        
+        # Try to get from cache first
+        cached_result = cache.get(cache_key)
+        if cached_result is not None:
+            cached_result['cached'] = True
+            results[f"{name}.{tld}"] = cached_result
+            continue
 
-@app.before_first_request
-def before_first_request():
-    """Initialize application state."""
-    app.config["start_time"] = datetime.utcnow().isoformat()
+        # If not in cache, check domain
+        full_domain = f"{name}.{tld}"
+        whois_result = check_whois(full_domain)
+        dns_result = check_dns(full_domain)
+        
+        status = "taken" if (whois_result.get("status") == "taken" or 
+                           dns_result.get("status") == "taken") else "available"
+        
+        response = {
+            "domain": full_domain,
+            "status": status,
+            "whois": whois_result,
+            "dns": dns_result,
+            "tld": tld,
+            "cached": False
+        }
+        
+        # Cache the result
+        cache.set(cache_key, response, timeout=300)
+        results[full_domain] = response
+
+    if not results and errors:
+        return jsonify({
+            "error": "No valid domains provided",
+            "details": errors
+        }), 400
+
+    return jsonify({
+        "results": results,
+        "errors": errors if errors else None
+    })
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port, debug=False)
