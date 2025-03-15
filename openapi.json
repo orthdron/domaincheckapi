@@ -1,0 +1,296 @@
+{
+  "info": {
+    "description": "API for checking domain availability using WHOIS and DNS lookups",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    },
+    "contact": {
+      "name": "Deepak Kapoor",
+      "url": "https://github.com/orthdron/domaincheckapi"
+    },
+    "title": "Domain Check API",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://domains.fiodel.com",
+      "description": "Production server"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "Domain Check"
+        ],
+        "summary": "Check domain availability",
+        "description": "Check availability of a single domain using WHOIS and DNS",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Domain name to check (without TLD)"
+          },
+          {
+            "name": "tld",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "com"
+            },
+            "description": "Top-level domain (e.g., com, net, org)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Domain check successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainCheckResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "description": "Check if the API is running",
+        "responses": {
+          "200": {
+            "description": "API is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get API metrics",
+        "description": "Get current API metrics including uptime and cache stats",
+        "responses": {
+          "200": {
+            "description": "Metrics retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bulk": {
+      "post": {
+        "tags": [
+          "Domain Check"
+        ],
+        "summary": "Bulk domain check",
+        "description": "Check availability of multiple domains at once",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bulk check successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DomainCheckResponse"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "openapi": "3.0.3",
+  "components": {
+    "schemas": {
+      "WhoisResult": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "taken",
+              "error"
+            ]
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        }
+      },
+      "DnsResult": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "taken",
+              "error"
+            ]
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "DomainCheckResponse": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "example": "example.com"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "taken"
+            ]
+          },
+          "whois": {
+            "$ref": "#/components/schemas/WhoisResult"
+          },
+          "dns": {
+            "$ref": "#/components/schemas/DnsResult"
+          },
+          "tld": {
+            "type": "string",
+            "example": "com"
+          },
+          "response_time": {
+            "type": "string",
+            "example": "0.45s"
+          },
+          "cached": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "example": "Invalid domain parameter"
+          },
+          "message": {
+            "type": "string",
+            "example": "Domain name contains invalid characters"
+          }
+        }
+      },
+      "MetricsResponse": {
+        "type": "object",
+        "properties": {
+          "uptime": {
+            "type": "string",
+            "example": "1d 2h 34m"
+          },
+          "cache_stats": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "rate_limits": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        }
+      },
+      "BulkCheckRequest": {
+        "type": "object",
+        "properties": {
+          "domains": {
+            "type": "array",
+            "example": [
+              "example",
+              "test"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "tld": {
+            "type": "string",
+            "example": "com"
+          }
+        }
+      }
+    }
+  }
+}
