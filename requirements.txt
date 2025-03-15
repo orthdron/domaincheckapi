@@ -3,7 +3,7 @@ flask-limiter==3.5.1
 flask-caching==2.3.1
 python-whois==0.8.0
 redis==5.0.1
-gunicorn==21.2.0
+gunicorn==23.0.0
 apispec==6.8.1
 apispec-webframeworks==0.5.2
 marshmallow==3.26.1
