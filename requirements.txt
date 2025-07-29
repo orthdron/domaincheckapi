@@ -9,5 +9,5 @@ apispec-webframeworks==1.2.0
 marshmallow==3.26.1
 flask-swagger-ui==4.11.1
 pytest==8.3.5
-pytest-cov==6.1.1
+pytest-cov==6.2.1
 setuptools
