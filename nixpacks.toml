@@ -1,10 +1,10 @@
 [phases.setup]
 nixPkgs = [
-    'python39',
-    'python39Packages.pip',
-    'python39Packages.virtualenv',
+    'python311',
+    'python311Packages.pip',
+    'python311Packages.virtualenv',
     'gcc',
-    'python39Packages.wheel'
+    'python311Packages.wheel'
 ]
 
 [phases.install]
