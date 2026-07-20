@@ -7,7 +7,7 @@ gunicorn==26.0.0
 apispec==6.10.0
 apispec-webframeworks==1.2.0
 marshmallow==4.3.0
-flask-swagger-ui==5.32.8
+flask-swagger-ui==5.32.9
 pytest==9.1.1
 pytest-cov==7.1.0
 setuptools
