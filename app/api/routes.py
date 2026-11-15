@@ -1,61 +1,87 @@
-from flask import request, jsonify
-from datetime import datetime, timedelta
-import concurrent.futures
 import time
-from app import limiter, cache
-from app.core.domain import check_whois, check_dns, is_valid_domain_name, is_valid_tld, clean_domain_input
+from typing import Any
+
+from flask import current_app, jsonify, request
+
+from app import cache, limiter
 from app.api import api_bp
-from app.schemas import DomainCheckResponseSchema, ErrorResponseSchema
+from app.core.domain import check_domains, clean_domain_input, is_cacheable
+
+_CACHE_PREFIX = "domain:"
+
+
+def _single_limit() -> str:
+    return f"{current_app.config['RATE_LIMIT_SINGLE']} per minute"
+
+
+def _bulk_limit() -> str:
+    return f"{current_app.config['RATE_LIMIT_BULK']} per minute"
+
+
+def _daily_limit() -> str:
+    return f"{current_app.config['RATE_LIMIT_DAILY']} per day"
+
+
+# One daily budget per client, shared by both check endpoints.
+_daily = limiter.shared_limit(_daily_limit, scope="domain-checks")
+
+
+def _metrics():
+    return current_app.extensions["domaincheck_metrics"]
+
+
+def _bad_request(message: str):
+    return jsonify({"error": "Invalid request", "message": message}), 400
+
+
+def _lookup(domains: list[str]) -> dict[str, dict[str, Any]]:
+    """Resolve fully-qualified domains via cache, then live lookups for the misses."""
+    keys = [_CACHE_PREFIX + d for d in domains]
+    try:
+        cached = dict(zip(domains, cache.get_many(*keys)))
+    except Exception as exc:  # noqa: BLE001 -- a cache outage must not take the API down
+        current_app.logger.warning("Cache read failed: %s", exc)
+        cached = dict.fromkeys(domains)
+
+    misses = [d for d, hit in cached.items() if hit is None]
+    _metrics().incr("cache_hits", len(cached) - len(misses))
+    _metrics().incr("cache_misses", len(misses))
+
+    fresh = check_domains(
+        misses,
+        whois_timeout=current_app.config["WHOIS_TIMEOUT"],
+        dns_timeout=current_app.config["DNS_TIMEOUT"],
+    ) if misses else {}
+
+    to_cache = {_CACHE_PREFIX + d: r for d, r in fresh.items() if is_cacheable(r)}
+    if to_cache:
+        try:
+            cache.set_many(to_cache)
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.warning("Cache write failed: %s", exc)
+
+    results = {}
+    for domain in domains:
+        hit = cached.get(domain)
+        results[domain] = {**hit, "cached": True} if hit is not None else {**fresh[domain], "cached": False}
+    return results
+
 
 @api_bp.route("/", methods=["GET"])
-@limiter.limit("10 per minute")
+@limiter.limit(_single_limit)
+@_daily
 def check_domain():
-    start_time = time.time()
-    
-    # Get domain parameter
-    domain_name = request.args.get('domain', '').strip()
-    tld = request.args.get('tld')  # Don't provide default here
-    
-    # Debug log
-    print(f"Received parameters - domain: '{domain_name}', tld: '{tld}'")
-    
-    # Clean and validate input
-    domain_name, tld, error = clean_domain_input(domain_name, tld)
+    start_time = time.perf_counter()
+
+    domain_name, tld, error = clean_domain_input(request.args.get("domain"), request.args.get("tld"))
     if error:
-        print(f"Validation error: {error}")
-        return jsonify({"error": "Invalid request", "message": error}), 400
-        
-    # Form full domain
+        return _bad_request(error)
+
     full_domain = f"{domain_name}.{tld}"
-    
-    # Check cache
-    cached_result = cache.get(full_domain)
-    if cached_result:
-        cached_result['cached'] = True
-        return jsonify(cached_result)
-    
-    # Check domain availability
-    whois_result = check_whois(full_domain)
-    dns_result = check_dns(full_domain)
-    
-    # Determine overall status
-    status = "taken" if whois_result.get("status") == "taken" or dns_result.get("status") == "taken" else "available"
-    
-    # Prepare response
-    response = {
-        "domain": full_domain,
-        "status": status,
-        "whois": whois_result,
-        "dns": dns_result,
-        "tld": tld,
-        "response_time": f"{time.time() - start_time:.2f}s",
-        "cached": False
-    }
-    
-    # Cache result
-    cache.set(full_domain, response)
-    
-    return jsonify(response)
+    result = _lookup([full_domain])[full_domain]
+    result["response_time"] = f"{time.perf_counter() - start_time:.2f}s"
+    return jsonify(result)
+
 
 @api_bp.route("/health", methods=["GET"])
 @limiter.exempt
@@ -63,80 +89,82 @@ def health_check():
     """Simple health check endpoint"""
     return jsonify({"status": "ok"})
 
+
 @api_bp.route("/metrics", methods=["GET"])
 @limiter.exempt
 def get_metrics():
-    """Get API metrics"""
-    # Get cache stats if available
-    cache_stats = {}
-    if hasattr(cache, 'get_stats'):
-        cache_stats = cache.get_stats()
-    
-    # Get rate limit info if available
-    rate_limits = {}
-    if hasattr(limiter, 'get_limits'):
-        rate_limits = limiter.get_limits()
-    
+    """Process-local API metrics."""
+    metrics = _metrics()
+    uptime = int(time.time() - metrics.started_at)
+    days, rem = divmod(uptime, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    config = current_app.config
     return jsonify({
-        "uptime": "1d 0h 0m",  # Simplified for now as we don't track start time
-        "cache_stats": cache_stats,
-        "rate_limits": rate_limits
+        "uptime": f"{days}d {hours}h {minutes}m",
+        "uptime_seconds": uptime,
+        "cache_stats": metrics.snapshot(),
+        "rate_limits": {
+            "enabled": bool(config["RATELIMIT_ENABLED"]),
+            "single": _single_limit(),
+            "bulk": _bulk_limit(),
+            "daily": _daily_limit(),
+        },
     })
 
+
 @api_bp.route("/bulk", methods=["POST"])
-@limiter.limit("5 per minute")
+@limiter.limit(_bulk_limit)
+@_daily
 def bulk_check():
-    """Check multiple domains at once"""
-    data = request.get_json()
-    
-    if not data or not isinstance(data, dict):
-        return jsonify({"error": "Invalid request", "message": "Request body must be JSON"}), 400
-        
-    domains = data.get('domains', [])
-    tld = data.get('tld', 'com')
-    
+    """Check multiple domains at once.
+
+    ``domains`` may contain plain names (``"example"``, using the top-level ``tld``)
+    or objects (``{"domain": "example", "tld": "org"}``).
+    """
+    start_time = time.perf_counter()
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _bad_request("Request body must be a JSON object")
+
+    domains = data.get("domains")
+    default_tld = data.get("tld")
+    max_domains = current_app.config["MAX_BULK_DOMAINS"]
+
     if not isinstance(domains, list):
-        return jsonify({"error": "Invalid request", "message": "Domains must be a list"}), 400
-        
-    if len(domains) > 10:  # Limit number of domains
-        return jsonify({"error": "Invalid request", "message": "Maximum 10 domains per request"}), 400
-    
-    results = []
-    for domain in domains:
-        domain_name, tld_clean, error = clean_domain_input(domain, tld)
+        return _bad_request("'domains' must be a list")
+    if not domains:
+        return _bad_request("'domains' must not be empty")
+    if len(domains) > max_domains:
+        return _bad_request(f"Maximum {max_domains} domains per request")
+
+    # Validate everything first so all lookups can run concurrently.
+    entries: list[tuple[str, str | None]] = []  # (full_domain or raw input, error)
+    for item in domains:
+        if isinstance(item, dict):
+            raw_name, raw_tld = item.get("domain"), item.get("tld")
+            if raw_tld is None:
+                raw_tld = default_tld
+        else:
+            raw_name, raw_tld = item, default_tld
+        domain_name, tld, error = clean_domain_input(raw_name, raw_tld)
         if error:
-            results.append({
-                "domain": f"{domain}.{tld}",
-                "status": "error",
-                "error": error
-            })
-            continue
-            
-        full_domain = f"{domain_name}.{tld_clean}"
-        
-        # Check cache
-        cached_result = cache.get(full_domain)
-        if cached_result:
-            cached_result['cached'] = True
-            results.append(cached_result)
-            continue
-        
-        # Check domain
-        whois_result = check_whois(full_domain)
-        dns_result = check_dns(full_domain)
-        
-        status = "taken" if whois_result.get("status") == "taken" or dns_result.get("status") == "taken" else "available"
-        
-        result = {
-            "domain": full_domain,
-            "status": status,
-            "whois": whois_result,
-            "dns": dns_result,
-            "tld": tld_clean,
-            "cached": False
-        }
-        
-        cache.set(full_domain, result)
-        results.append(result)
-    
-    return jsonify({"results": results}) 
+            label = raw_name if isinstance(raw_name, str) else repr(raw_name)
+            if isinstance(raw_tld, str) and raw_tld:
+                label = f"{label}.{raw_tld.lstrip('.')}"
+            entries.append((label, error))
+        else:
+            entries.append((f"{domain_name}.{tld}", None))
+
+    valid = list(dict.fromkeys(d for d, err in entries if err is None))
+    found = _lookup(valid) if valid else {}
+
+    response_time = f"{time.perf_counter() - start_time:.2f}s"
+    results = [
+        {"domain": d, "status": "error", "error": err}
+        if err
+        else {**found[d], "response_time": response_time}
+        for d, err in entries
+    ]
+    return jsonify({"results": results, "response_time": response_time})

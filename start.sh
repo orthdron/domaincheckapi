@@ -1,22 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Local convenience script: create a venv, install dependencies, run gunicorn.
+set -euo pipefail
+cd "$(dirname "$0")"
 
-# Check if virtual environment exists
 if [ ! -d ".venv" ]; then
     echo "Creating virtual environment..."
     python3 -m venv .venv
 fi
-
-# Activate virtual environment
 source .venv/bin/activate
 
-# Install dependencies
 echo "Installing dependencies..."
-pip install -r requirements.txt
+pip install -q -r requirements.txt
 
-# Generate OpenAPI spec
-echo "Generating OpenAPI specification..."
-python -c "from app.docs.routes import generate_openapi_spec, save_openapi_spec; save_openapi_spec(generate_openapi_spec())"
-
-# Start the application
-echo "Starting application..."
-python wsgi.py 
+echo "Starting application on port ${PORT:-3000}..."
+exec gunicorn wsgi:app

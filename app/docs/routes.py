@@ -1,26 +1,34 @@
-from flask import jsonify, current_app
 import json
-import os
+import logging
+from functools import cache
+
 from apispec import APISpec
 from apispec.ext.marshmallow import MarshmallowPlugin
+from flask import jsonify
+
 from app.docs import docs_bp
 from app.schemas import (
+    BulkCheckRequestSchema,
+    BulkErrorItemSchema,
     DomainCheckResponseSchema,
     ErrorResponseSchema,
     MetricsResponseSchema,
-    BulkCheckRequestSchema
 )
 
-def save_openapi_spec(spec: dict, filepath: str = "openapi.json") -> None:
-    """Save OpenAPI specification to a file"""
-    try:
-        with open(filepath, 'w') as f:
-            json.dump(spec, f, indent=2)
-    except Exception as e:
-        current_app.logger.error(f"Error saving OpenAPI spec to {filepath}: {str(e)}")
+logger = logging.getLogger(__name__)
 
+
+def save_openapi_spec(spec: dict, filepath: str = "openapi.json") -> None:
+    """Write the OpenAPI specification to a file (used to refresh openapi.json)."""
+    with open(filepath, "w") as f:
+        json.dump(spec, f, indent=2)
+        f.write("\n")
+    logger.info("Wrote OpenAPI spec to %s", filepath)
+
+
+@cache
 def generate_openapi_spec() -> dict:
-    """Generate OpenAPI specification"""
+    """Generate the OpenAPI specification (built once per process)."""
     spec = APISpec(
         title="Domain Check API",
         version="1.0.0",
@@ -45,6 +53,14 @@ def generate_openapi_spec() -> dict:
     spec.components.schema("ErrorResponse", schema=ErrorResponseSchema)
     spec.components.schema("MetricsResponse", schema=MetricsResponseSchema)
     spec.components.schema("BulkCheckRequest", schema=BulkCheckRequestSchema)
+    spec.components.schema("BulkErrorItem", schema=BulkErrorItemSchema)
+
+    rate_limited = {
+        "description": "Rate limit exceeded (only when ENABLE_RATE_LIMITS=true)",
+        "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}
+        },
+    }
 
     # Add paths
     paths = {
@@ -84,7 +100,8 @@ def generate_openapi_spec() -> dict:
                                 "schema": {"$ref": "#/components/schemas/ErrorResponse"}
                             }
                         }
-                    }
+                    },
+                    "429": rate_limited
                 }
             }
         },
@@ -150,8 +167,14 @@ def generate_openapi_spec() -> dict:
                                     "properties": {
                                         "results": {
                                             "type": "array",
-                                            "items": {"$ref": "#/components/schemas/DomainCheckResponse"}
-                                        }
+                                            "items": {
+                                                "oneOf": [
+                                                    {"$ref": "#/components/schemas/DomainCheckResponse"},
+                                                    {"$ref": "#/components/schemas/BulkErrorItem"}
+                                                ]
+                                            }
+                                        },
+                                        "response_time": {"type": "string", "example": "1.20s"}
                                     }
                                 }
                             }
@@ -164,7 +187,8 @@ def generate_openapi_spec() -> dict:
                                 "schema": {"$ref": "#/components/schemas/ErrorResponse"}
                             }
                         }
-                    }
+                    },
+                    "429": rate_limited
                 }
             }
         }
@@ -178,16 +202,8 @@ def generate_openapi_spec() -> dict:
 
 @docs_bp.route('/openapi.json')
 def openapi_spec():
-    try:
-        # Try to read from file first
-        if os.path.exists('openapi.json'):
-            with open('openapi.json', 'r') as f:
-                return jsonify(json.load(f))
-        # Fall back to generating on the fly
-        return jsonify(generate_openapi_spec())
-    except Exception as e:
-        current_app.logger.error(f"Error serving OpenAPI spec: {str(e)}")
-        return {"error": "Failed to generate API documentation"}, 500
+    # Served from code so it can never drift from the running API.
+    return jsonify(generate_openapi_spec())
 
 @docs_bp.route('/docs')
 def docs():
@@ -217,4 +233,4 @@ def docs():
         </script>
     </body>
     </html>
-    """ 
+    """

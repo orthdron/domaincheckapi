@@ -1,189 +1,296 @@
-import unittest
-from app import create_app
-from app.core.domain import check_whois, check_dns
 import json
-import os
+import time
+from pathlib import Path
 
-class TestDomainChecker(unittest.TestCase):
-    def setUp(self):
-        """Set up test environment"""
-        # Ensure rate limiting is disabled for tests
-        os.environ['ENABLE_RATE_LIMITS'] = 'false'
-        self.app = create_app()
-        self.client = self.app.test_client()
-        self.app.testing = True
+import pytest
 
-    def tearDown(self):
-        """Clean up after tests"""
-        # Clean up environment variables
-        if 'ENABLE_RATE_LIMITS' in os.environ:
-            del os.environ['ENABLE_RATE_LIMITS']
+from app.docs.routes import generate_openapi_spec
 
-    def test_health_check(self):
-        """Test health check endpoint"""
-        response = self.client.get('/health')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
-        self.assertEqual(data['status'], 'ok')
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
-    def test_metrics(self):
-        """Test metrics endpoint"""
-        response = self.client.get('/metrics')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
-        self.assertIn('cache_stats', data)
-        self.assertIn('uptime', data)
-        self.assertIn('rate_limits', data)
 
-    def test_known_domains(self):
-        """Test checking known domains (google.com and facebook.com)"""
-        # Test google.com
-        response = self.client.get('/?domain=google')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
-        self.assertEqual(data['status'], 'taken')
-        self.assertEqual(data['domain'], 'google.com')
-        self.assertEqual(data['whois']['status'], 'taken')
-        self.assertEqual(data['dns']['status'], 'taken')
+# --------------------------------------------------------------------------- #
+# System endpoints
+# --------------------------------------------------------------------------- #
 
-        # Test facebook.com
-        response = self.client.get('/?domain=facebook')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
-        self.assertEqual(data['status'], 'taken')
-        self.assertEqual(data['domain'], 'facebook.com')
-        self.assertEqual(data['whois']['status'], 'taken')
-        self.assertEqual(data['dns']['status'], 'taken')
+def test_health_check(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok"}
 
-    def test_invalid_domain(self):
-        """Test invalid domain input"""
-        invalid_domains = [
-            'inv@lid',
-            '-invalid',
-            'invalid-',
-            'inv--alid',
-            'a' * 64,  # Too long
-            '',  # Empty
-            ' ',  # Just whitespace
-            'domain.with.dots'
-        ]
-        
-        for domain in invalid_domains:
-            response = self.client.get(f'/?domain={domain}')
-            self.assertEqual(response.status_code, 400,
-                           f"Expected 400 for domain: {domain}")
-            data = json.loads(response.data)
-            self.assertIn('error', data)
-            self.assertIn('message', data)
 
-    def test_invalid_tld(self):
-        """Test invalid TLD input"""
-        invalid_tlds = [
-            '123',  # Numbers not allowed
-            'a',    # Too short
-            'com@', # Invalid characters
-            '',     # Empty
-            ' ',    # Just whitespace
-            'com.', # Trailing dot
-            'co.uk' # Compound TLD not supported
-        ]
-        
-        for tld in invalid_tlds:
-            response = self.client.get(f'/?domain=example&tld={tld}')
-            self.assertEqual(response.status_code, 400,
-                           f"Expected 400 for TLD: {tld}")
-            data = json.loads(response.data)
-            self.assertIn('error', data)
-            self.assertIn('message', data)
+def test_metrics_counts_cache_hits_and_misses(client):
+    client.get("/?domain=google")
+    client.get("/?domain=google")
 
-    def test_missing_domain(self):
-        """Test missing domain parameter"""
-        response = self.client.get('/')
-        self.assertEqual(response.status_code, 400)
-        data = json.loads(response.data)
-        self.assertIn('error', data)
-        self.assertIn('message', data)
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["cache_stats"] == {"cache_hits": 1, "cache_misses": 1}
+    assert data["uptime"].endswith("m")
+    assert isinstance(data["uptime_seconds"], int)
+    assert data["rate_limits"] == {
+        "enabled": False,
+        "single": "10 per minute",
+        "bulk": "5 per minute",
+        "daily": "100 per day",
+    }
 
-    def test_bulk_check(self):
-        """Test bulk domain checking"""
-        data = {
-            "domains": ["google", "facebook"],
-            "tld": "com"
-        }
-        response = self.client.post('/bulk', 
-                                  json=data,
-                                  content_type='application/json')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
-        self.assertIn('results', data)
-        
-        # Check results
-        results = data['results']
-        self.assertEqual(len(results), 2)
-        
-        # Check google.com result
-        google_result = next(r for r in results if r['domain'] == 'google.com')
-        self.assertEqual(google_result['status'], 'taken')
-        self.assertEqual(google_result['whois']['status'], 'taken')
-        self.assertEqual(google_result['dns']['status'], 'taken')
-        
-        # Check facebook.com result
-        facebook_result = next(r for r in results if r['domain'] == 'facebook.com')
-        self.assertEqual(facebook_result['status'], 'taken')
-        self.assertEqual(facebook_result['whois']['status'], 'taken')
-        self.assertEqual(facebook_result['dns']['status'], 'taken')
 
-    def test_custom_tld(self):
-        """Test custom TLD parameter"""
-        response = self.client.get('/?domain=google&tld=org')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
-        self.assertEqual(data['domain'], 'google.org')
-        self.assertEqual(data['tld'], 'org')
+def test_unknown_route_returns_json(client):
+    response = client.get("/nope")
+    assert response.status_code == 404
+    assert response.get_json()["error"] == "Not Found"
 
-    def test_bulk_check_with_invalid_domains(self):
-        """Test bulk domain checking with invalid entries"""
-        data = {
-            "domains": ["google", "inv@lid", "-invalid", ""],
-            "tld": "com"
-        }
-        response = self.client.post('/bulk',
-                                  json=data,
-                                  content_type='application/json')
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.data)
-        self.assertIsInstance(data['results'], list)
-        
-        # Should have one successful result (google.com) and three errors
-        valid_results = [r for r in data['results'] if r['status'] == 'taken']
-        error_results = [r for r in data['results'] if r['status'] == 'error']
-        
-        self.assertEqual(len(valid_results), 1)
-        self.assertEqual(len(error_results), 3)
-        
-        # Check the successful result
-        google_result = next(r for r in data['results'] if r['domain'] == 'google.com')
-        self.assertEqual(google_result['status'], 'taken')
 
-    def test_bulk_check_invalid_request(self):
-        """Test bulk check with invalid request format"""
-        # Test with missing domains field
-        response = self.client.post('/bulk',
-                                  json={},
-                                  content_type='application/json')
-        self.assertEqual(response.status_code, 400)
-        
-        # Test with domains not being a list
-        response = self.client.post('/bulk',
-                                  json={"domains": "not a list"},
-                                  content_type='application/json')
-        self.assertEqual(response.status_code, 400)
-        
-        # Test with too many domains
-        response = self.client.post('/bulk',
-                                  json={"domains": ["test"] * 11},
-                                  content_type='application/json')
-        self.assertEqual(response.status_code, 400)
+# --------------------------------------------------------------------------- #
+# Single domain check
+# --------------------------------------------------------------------------- #
 
-if __name__ == '__main__':
-    unittest.main() 
+@pytest.mark.parametrize("name", ["google", "facebook"])
+def test_known_domains_are_taken(client, name):
+    data = client.get(f"/?domain={name}").get_json()
+    assert data["domain"] == f"{name}.com"
+    assert data["status"] == "taken"
+    assert data["whois"]["status"] == "taken"
+    assert data["whois"]["registrar"] == "MarkMonitor, Inc."
+    assert data["dns"]["status"] == "taken"
+    assert data["tld"] == "com"
+    assert data["cached"] is False
+    assert data["response_time"].endswith("s")
+
+
+def test_available_domain(client):
+    response = client.get("/?domain=zqxv-unregistered-9f3k")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["status"] == "available"
+    assert data["whois"] == {"status": "available"}
+    assert data["dns"] == {"status": "available"}
+
+
+def test_custom_tld(client):
+    data = client.get("/?domain=google&tld=org").get_json()
+    assert data["domain"] == "google.org"
+    assert data["tld"] == "org"
+
+
+def test_input_is_normalised(client):
+    data = client.get("/?domain=%20Google%20&tld=.COM").get_json()
+    assert data["domain"] == "google.com"
+
+
+@pytest.mark.parametrize("domain", ["x", "a1", "xn--bcher-kva", "my-site"])
+def test_valid_edge_case_domains(client, domain):
+    assert client.get(f"/?domain={domain}").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["inv@lid", "-invalid", "invalid-", "inv--alid", "a" * 64, "", " ", "domain.with.dots"],
+)
+def test_invalid_domain(client, domain):
+    response = client.get(f"/?domain={domain}")
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data["error"] == "Invalid request"
+    assert data["message"]
+
+
+@pytest.mark.parametrize("tld", ["123", "a", "com@", "", " ", "com.", "co.uk"])
+def test_invalid_tld(client, tld):
+    response = client.get(f"/?domain=example&tld={tld}")
+    assert response.status_code == 400
+    assert response.get_json()["message"] == "Invalid TLD format"
+
+
+def test_missing_domain(client):
+    response = client.get("/")
+    assert response.status_code == 400
+    assert response.get_json()["message"] == "Missing domain parameter"
+
+
+def test_results_are_cached(client, lookups):
+    first = client.get("/?domain=google").get_json()
+    second = client.get("/?domain=google").get_json()
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert second["status"] == "taken"
+    assert lookups.count("whois") == 1
+
+
+def test_failed_lookups_are_not_cached(client, lookups):
+    lookups.whois_override = lambda d: {"status": "timeout", "error": "WHOIS lookup timed out"}
+    client.get("/?domain=flaky")
+    second = client.get("/?domain=flaky").get_json()
+    assert second["status"] == "unknown"
+    assert second["cached"] is False
+    assert lookups.count("whois") == 2
+
+
+def test_dns_hit_is_taken_even_if_whois_fails(client, lookups):
+    lookups.whois_override = lambda d: {"status": "error", "error": "boom"}
+    assert client.get("/?domain=google").get_json()["status"] == "taken"
+
+
+def test_slow_whois_is_cut_off_at_timeout(make_app, lookups):
+    def slow(domain):
+        time.sleep(1.0)
+        return {"status": "available"}
+
+    lookups.whois_override = slow
+    client = make_app(WHOIS_TIMEOUT=0.2).test_client()
+
+    started = time.perf_counter()
+    response = client.get("/?domain=slowpoke")
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["status"] == "unknown"
+    assert data["whois"]["status"] == "timeout"
+    assert data["dns"]["status"] == "available"
+    assert elapsed < 0.8
+
+
+# --------------------------------------------------------------------------- #
+# Bulk check
+# --------------------------------------------------------------------------- #
+
+def test_bulk_check_with_names(client):
+    response = client.post("/bulk", json={"domains": ["google", "facebook"], "tld": "com"})
+    assert response.status_code == 200
+    results = response.get_json()["results"]
+    assert [r["domain"] for r in results] == ["google.com", "facebook.com"]
+    assert all(r["status"] == "taken" for r in results)
+    assert all(r["whois"]["status"] == "taken" and r["dns"]["status"] == "taken" for r in results)
+
+
+def test_bulk_check_with_objects(client):
+    """The object form documented in the README used to crash with a 500."""
+    payload = {
+        "domains": [
+            {"domain": "google", "tld": "com"},
+            {"domain": "google", "tld": "org"},
+            {"domain": "example"},
+            "facebook",
+        ],
+        "tld": "com",
+    }
+    response = client.post("/bulk", json=payload)
+    assert response.status_code == 200
+    results = response.get_json()["results"]
+    assert [r["domain"] for r in results] == ["google.com", "google.org", "example.com", "facebook.com"]
+    assert [r["status"] for r in results] == ["taken", "taken", "available", "taken"]
+
+
+def test_bulk_check_with_invalid_domains(client):
+    payload = {"domains": ["google", "inv@lid", "-invalid", "", 42, {"tld": "com"}]}
+    results = client.post("/bulk", json=payload).get_json()["results"]
+    assert len(results) == 6
+    assert results[0]["domain"] == "google.com"
+    assert results[0]["status"] == "taken"
+    assert [r["status"] for r in results[1:]] == ["error"] * 5
+    assert all(r["error"] for r in results[1:])
+
+
+def test_bulk_deduplicates_lookups(client, lookups):
+    results = client.post("/bulk", json={"domains": ["google", "google", "GOOGLE"]}).get_json()["results"]
+    assert len(results) == 3
+    assert lookups.count("whois") == 1
+
+
+def test_bulk_lookups_run_concurrently(make_app, lookups):
+    def slow(domain):
+        time.sleep(0.3)
+        return {"status": "available"}
+
+    lookups.whois_override = slow
+    lookups.dns_override = slow
+    client = make_app().test_client()
+
+    started = time.perf_counter()
+    response = client.post("/bulk", json={"domains": [f"site{i}" for i in range(5)]})
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    assert len(response.get_json()["results"]) == 5
+    assert elapsed < 1.0  # 10 sequential lookups would take 3s
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"json": {}}, "'domains' must be a list"),
+        ({"json": {"domains": "not a list"}}, "'domains' must be a list"),
+        ({"json": {"domains": []}}, "'domains' must not be empty"),
+        ({"json": {"domains": ["test"] * 11}}, "Maximum 10 domains per request"),
+        ({"json": ["google"]}, "Request body must be a JSON object"),
+        ({"data": "not json", "content_type": "text/plain"}, "Request body must be a JSON object"),
+        ({"data": "{broken", "content_type": "application/json"}, "Request body must be a JSON object"),
+    ],
+)
+def test_bulk_check_invalid_request(client, kwargs, message):
+    response = client.post("/bulk", **kwargs)
+    assert response.status_code == 400
+    assert response.get_json()["message"] == message
+
+
+def test_bulk_limit_is_configurable(make_app, lookups):
+    client = make_app(MAX_BULK_DOMAINS=2).test_client()
+    response = client.post("/bulk", json={"domains": ["a", "b", "c"]})
+    assert response.status_code == 400
+    assert response.get_json()["message"] == "Maximum 2 domains per request"
+
+
+# --------------------------------------------------------------------------- #
+# Rate limiting
+# --------------------------------------------------------------------------- #
+
+def test_rate_limits_are_enforced_when_enabled(make_app, lookups):
+    client = make_app(RATELIMIT_ENABLED=True, RATE_LIMIT_SINGLE=2).test_client()
+    assert client.get("/?domain=google").status_code == 200
+    assert client.get("/?domain=google").status_code == 200
+
+    response = client.get("/?domain=google")
+    assert response.status_code == 429
+    assert response.get_json()["error"] == "Too Many Requests"
+
+    # Exempt endpoints keep working.
+    assert client.get("/health").status_code == 200
+    assert client.get("/metrics").status_code == 200
+
+
+def test_daily_limit_is_shared_across_endpoints(make_app, lookups):
+    client = make_app(RATELIMIT_ENABLED=True, RATE_LIMIT_DAILY=2).test_client()
+    assert client.get("/?domain=google").status_code == 200
+    assert client.post("/bulk", json={"domains": ["google"]}).status_code == 200
+    assert client.get("/?domain=google").status_code == 429
+
+
+def test_rate_limits_are_off_by_default(client):
+    for _ in range(15):
+        assert client.get("/?domain=google").status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Docs
+# --------------------------------------------------------------------------- #
+
+def test_openapi_endpoint(client):
+    spec = client.get("/openapi.json").get_json()
+    assert spec["info"]["title"] == "Domain Check API"
+    assert {"/", "/bulk", "/health", "/metrics"} <= set(spec["paths"])
+
+
+def test_committed_openapi_json_is_up_to_date():
+    committed = json.loads((REPO_ROOT / "openapi.json").read_text())
+    assert committed == generate_openapi_spec(), (
+        "openapi.json is stale; regenerate with: python -m app.docs"
+    )
+
+
+def test_docs_page(client):
+    response = client.get("/docs")
+    assert response.status_code == 200
+    assert b"swagger-ui" in response.data

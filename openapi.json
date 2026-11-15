@@ -66,6 +66,16 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Rate limit exceeded (only when ENABLE_RATE_LIMITS=true)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -146,8 +156,19 @@
                     "results": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/DomainCheckResponse"
+                        "oneOf": [
+                          {
+                            "$ref": "#/components/schemas/DomainCheckResponse"
+                          },
+                          {
+                            "$ref": "#/components/schemas/BulkErrorItem"
+                          }
+                        ]
                       }
+                    },
+                    "response_time": {
+                      "type": "string",
+                      "example": "1.20s"
                     }
                   }
                 }
@@ -156,6 +177,16 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (only when ENABLE_RATE_LIMITS=true)",
             "content": {
               "application/json": {
                 "schema": {
@@ -179,14 +210,28 @@
             "enum": [
               "available",
               "taken",
-              "error"
+              "error",
+              "timeout"
             ]
           },
-          "details": {
-            "type": "object",
-            "additionalProperties": {}
+          "expiration_date": {
+            "type": "string",
+            "example": "2028-09-14",
+            "description": "Only for taken domains",
+            "nullable": true
+          },
+          "registrar": {
+            "type": "string",
+            "example": "MarkMonitor, Inc.",
+            "description": "Only for taken domains",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "description": "Only when status is error or timeout"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "DnsResult": {
         "type": "object",
@@ -196,16 +241,21 @@
             "enum": [
               "available",
               "taken",
-              "error"
+              "error",
+              "timeout"
             ]
           },
-          "records": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
+          "ip": {
+            "type": "string",
+            "example": "93.184.216.34",
+            "description": "Only for taken domains"
+          },
+          "error": {
+            "type": "string",
+            "description": "Only when status is error or timeout"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "DomainCheckResponse": {
         "type": "object",
@@ -218,8 +268,10 @@
             "type": "string",
             "enum": [
               "available",
-              "taken"
-            ]
+              "taken",
+              "unknown"
+            ],
+            "description": "taken if WHOIS or DNS finds the domain; unknown if WHOIS failed and DNS found nothing (retry later); otherwise available"
           },
           "whois": {
             "$ref": "#/components/schemas/WhoisResult"
@@ -238,20 +290,22 @@
           "cached": {
             "type": "boolean"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ErrorResponse": {
         "type": "object",
         "properties": {
           "error": {
             "type": "string",
-            "example": "Invalid domain parameter"
+            "example": "Invalid request"
           },
           "message": {
             "type": "string",
-            "example": "Domain name contains invalid characters"
+            "example": "Invalid domain name format"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MetricsResponse": {
         "type": "object",
@@ -260,36 +314,79 @@
             "type": "string",
             "example": "1d 2h 34m"
           },
+          "uptime_seconds": {
+            "type": "integer",
+            "example": 95640
+          },
           "cache_stats": {
             "type": "object",
+            "example": {
+              "cache_hits": 150,
+              "cache_misses": 50
+            },
             "additionalProperties": {
               "type": "integer"
             }
           },
           "rate_limits": {
             "type": "object",
+            "example": {
+              "enabled": true,
+              "single": "10 per minute",
+              "bulk": "5 per minute",
+              "daily": "100 per day"
+            },
             "additionalProperties": {}
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkCheckRequest": {
         "type": "object",
         "properties": {
           "domains": {
             "type": "array",
+            "description": "Domain names (without TLD), or objects of the form {\"domain\": \"example\", \"tld\": \"org\"}. Maximum 10 by default.",
             "example": [
               "example",
-              "test"
+              {
+                "domain": "example",
+                "tld": "org"
+              }
             ],
-            "items": {
-              "type": "string"
-            }
+            "items": {}
           },
           "tld": {
             "type": "string",
-            "example": "com"
+            "default": "com",
+            "example": "com",
+            "description": "Default TLD for entries without one"
           }
-        }
+        },
+        "required": [
+          "domains"
+        ],
+        "additionalProperties": false
+      },
+      "BulkErrorItem": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "example": "inv@lid.com"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "error"
+            ]
+          },
+          "error": {
+            "type": "string",
+            "example": "Invalid domain name format"
+          }
+        },
+        "additionalProperties": false
       }
     }
   }

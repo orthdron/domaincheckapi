@@ -15,11 +15,10 @@ cmds = [
 ]
 
 [start]
-cmd = 'bash start.sh'
+cmd = '/app/.venv/bin/gunicorn wsgi:app'
 
 [variables]
-FLASK_APP = "script.py"
-FLASK_ENV = "production"
+FLASK_APP = "wsgi.py"
 PYTHONPATH = "/app"
 PYTHONUNBUFFERED = "1"
 PORT = "3000"

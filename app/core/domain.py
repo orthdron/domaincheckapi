@@ -1,127 +1,247 @@
+"""Domain validation and availability lookups (WHOIS + DNS)."""
+from __future__ import annotations
+
+import logging
+import os
 import re
 import socket
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from datetime import date, datetime
+from typing import Any, Callable, Iterable, Optional, Tuple
+
 import whois
-import concurrent.futures
-from functools import wraps
-from typing import Tuple, Dict, Any, Optional
+from whois.exceptions import WhoisDomainNotFoundError
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_TLD = "com"
+DEFAULT_WHOIS_TIMEOUT = 5.0
+DEFAULT_DNS_TIMEOUT = 3.0
+
+# Lookup statuses that mean "we could not find out" -- never cached.
+FAILED_STATUSES = frozenset({"error", "timeout"})
+
+# What python-whois puts in the response body when it swallows a socket error.
+_WHOIS_SOCKET_ERROR_PREFIX = "Socket not responding"
+
+_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_TLD_RE = re.compile(r"^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$")
+
+# getaddrinfo error codes that mean "this name has no address records".
+# Anything else (EAI_AGAIN, EAI_FAIL, ...) is a resolver failure, not an answer.
+_DNS_NOT_FOUND_CODES = frozenset(
+    code
+    for code in (getattr(socket, "EAI_NONAME", None), getattr(socket, "EAI_NODATA", None))
+    if code is not None
+)
+
+# One shared pool for all lookups. WHOIS and DNS calls are blocking I/O and can't be
+# cancelled once started, so a shared pool bounds the number of in-flight lookups
+# instead of spawning (and then waiting on) a fresh pool per call.
+_executor = ThreadPoolExecutor(
+    max_workers=max(1, int(os.environ.get("LOOKUP_WORKERS", "32") or 32)),
+    thread_name_prefix="domain-lookup",
+)
+
+
+# --------------------------------------------------------------------------- #
+# Validation
+# --------------------------------------------------------------------------- #
 
 def is_valid_domain_name(domain: str) -> bool:
-    """Validate domain name format."""
-    if not domain or not isinstance(domain, str):
+    """Validate a single domain label (the part before the TLD)."""
+    if not isinstance(domain, str):
         return False
-        
-    # Clean input
     domain = domain.strip().lower()
-    
-    # Basic validation
-    if not domain or len(domain) > 63:
+    if not _LABEL_RE.match(domain):
         return False
-        
-    # Check for invalid characters first
-    if re.search(r'[^a-z0-9-]', domain):
+    # Consecutive hyphens are reserved for IDN (punycode) labels like "xn--bcher-kva".
+    if "--" in domain and not domain.startswith("xn--"):
         return False
-        
-    # Must start and end with alphanumeric
-    if domain.startswith('-') or domain.endswith('-'):
-        return False
-        
-    # Check for consecutive hyphens
-    if '--' in domain:
-        return False
-        
-    # Final regex check for overall format
-    return bool(re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$', domain))
+    return True
+
 
 def is_valid_tld(tld: str) -> bool:
-    """Validate TLD format."""
-    if not tld or not isinstance(tld, str):
+    """Validate TLD format (letters only, or a punycode IDN TLD)."""
+    if not isinstance(tld, str):
         return False
-        
-    # Clean input
-    tld = tld.strip().lstrip('.').lower()
-    
-    # Basic validation
-    if not tld or len(tld) < 2:
-        return False
-        
-    # Check for invalid characters first
-    if re.search(r'[^a-z]', tld):
-        return False
-        
-    # Final regex check for overall format
-    return bool(re.match(r'^[a-z]{2,}$', tld))
+    return bool(_TLD_RE.match(tld.strip().lstrip(".").lower()))
 
-def clean_domain_input(domain_name: str, tld: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Clean and validate domain input."""
-    if not domain_name:
+
+def clean_domain_input(
+    domain_name: Any, tld: Any = None
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Normalise and validate input. Returns (domain, tld, error)."""
+    if domain_name is None or (isinstance(domain_name, str) and not domain_name.strip()):
         return None, None, "Missing domain parameter"
-        
-    # Clean inputs
+    if not isinstance(domain_name, str):
+        return None, None, "Invalid domain name format"
+
     domain_name = domain_name.strip().lower()
-    
-    # Handle TLD
+
     if tld is None:
-        tld = "com"  # Use default TLD if none provided
+        tld = DEFAULT_TLD
+    elif not isinstance(tld, str):
+        return None, None, "Invalid TLD format"
     else:
-        tld = tld.strip().lstrip('.').lower()
-        if not tld:  # Empty string after cleaning
-            return None, None, "Invalid TLD format"
-    
-    # Validate domain name
+        tld = tld.strip().lstrip(".").lower()
+
     if not is_valid_domain_name(domain_name):
         return None, None, "Invalid domain name format"
-        
-    # Validate TLD if not using default
-    if tld != "com" and not is_valid_tld(tld):
+    if not is_valid_tld(tld):
         return None, None, "Invalid TLD format"
-        
+
     return domain_name, tld, None
 
-def with_timeout(timeout: int):
-    """Decorator to add timeout to functions."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            result = {"status": "error", "error": "Timeout"}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(func, *args, **kwargs)
-                try:
-                    result = future.result(timeout=timeout)
-                except concurrent.futures.TimeoutError:
-                    return "timeout"
-                except Exception as e:
-                    return "error"
-            return result
-        return wrapper
-    return decorator
 
-@with_timeout(5)  # 5 seconds timeout
-def check_whois(domain: str) -> Dict[str, Any]:
-    """Check WHOIS for domain availability."""
-    try:
-        w = whois.whois(domain)
-        if w.domain_name:
-            expiration_date = w.expiration_date
-            if isinstance(expiration_date, list):
-                expiration_date = expiration_date[0]
-            return {
-                "status": "taken",
-                "expiration_date": expiration_date.strftime("%Y-%m-%d") if expiration_date else None,
-                "registrar": w.registrar
-            }
-        return {"status": "available"}
-    except whois.parser.PywhoisError:
-        return {"status": "available"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+# --------------------------------------------------------------------------- #
+# Raw lookups (blocking; run on the shared executor)
+# --------------------------------------------------------------------------- #
 
-@with_timeout(3)  # 3 seconds timeout
-def check_dns(domain: str) -> Dict[str, Any]:
-    """Check DNS resolution for domain availability."""
+def _format_date(value: Any) -> Optional[str]:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    if value is None:
+        return None
+    return str(value)
+
+
+def _whois_lookup(domain: str, timeout: float = DEFAULT_WHOIS_TIMEOUT) -> dict[str, Any]:
+    # A lookup is usually two hops: registry, then a referral to the registrar's
+    # server. Registrar servers are often slow; giving each socket half the budget
+    # lets a stalled referral fail in time for the registry's answer to be used.
+    socket_timeout = max(1.0, timeout / 2)
     try:
-        ip = socket.gethostbyname(domain)
-        return {"status": "taken", "ip": ip}
-    except socket.gaierror:
+        w = whois.whois(domain, quiet=True, timeout=socket_timeout)
+    except WhoisDomainNotFoundError:
         return {"status": "available"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)} 
+    except Exception as exc:  # noqa: BLE001 -- python-whois raises many types
+        logger.warning("WHOIS lookup failed for %s: %s", domain, exc)
+        return {"status": "error", "error": str(exc) or exc.__class__.__name__}
+
+    if w.domain_name:
+        registrar = w.registrar
+        if isinstance(registrar, list):
+            registrar = registrar[0] if registrar else None
+        return {
+            "status": "taken",
+            "expiration_date": _format_date(w.expiration_date),
+            "registrar": registrar,
+        }
+
+    # python-whois swallows socket errors and returns their message as the response
+    # body. That parses to an entry with no domain_name, which must not be mistaken
+    # for "available". (A failed registrar referral is fine: the registry's answer
+    # is still in the text and parses as taken above.)
+    text = (getattr(w, "text", "") or "").strip()
+    if not text:
+        return {"status": "error", "error": "Empty WHOIS response"}
+    if text.startswith(_WHOIS_SOCKET_ERROR_PREFIX):
+        status = "timeout" if "timed out" in text.lower() else "error"
+        logger.warning("WHOIS server unreachable for %s: %s", domain, text)
+        return {"status": status, "error": text}
+    return {"status": "available"}
+
+
+def _dns_lookup(domain: str) -> dict[str, Any]:
+    try:
+        infos = socket.getaddrinfo(domain, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        if exc.errno in _DNS_NOT_FOUND_CODES:
+            return {"status": "available"}
+        return {"status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "error": str(exc)}
+
+    addresses = [info[4][0] for info in infos]
+    if not addresses:
+        return {"status": "available"}
+    ipv4 = [a for a in addresses if ":" not in a]  # prefer IPv4 for the "ip" field
+    return {"status": "taken", "ip": (ipv4 or addresses)[0]}
+
+
+# --------------------------------------------------------------------------- #
+# Timeout-bounded public API
+# --------------------------------------------------------------------------- #
+
+def _collect(future: Future, deadline: float, what: str) -> dict[str, Any]:
+    try:
+        return future.result(timeout=max(0.0, deadline - time.monotonic()))
+    except FutureTimeoutError:
+        future.cancel()  # frees the slot if the lookup never started
+        return {"status": "timeout", "error": f"{what} lookup timed out"}
+    except Exception as exc:  # noqa: BLE001 -- lookups catch their own errors
+        return {"status": "error", "error": str(exc)}
+
+
+def _run(fn: Callable[..., dict[str, Any]], *args: Any, timeout: float, what: str) -> dict[str, Any]:
+    return _collect(_executor.submit(fn, *args), time.monotonic() + timeout, what)
+
+
+def check_whois(domain: str, timeout: float = DEFAULT_WHOIS_TIMEOUT) -> dict[str, Any]:
+    """WHOIS availability check, bounded by ``timeout`` seconds. Never raises."""
+    return _run(_whois_lookup, domain, timeout, timeout=timeout, what="WHOIS")
+
+
+def check_dns(domain: str, timeout: float = DEFAULT_DNS_TIMEOUT) -> dict[str, Any]:
+    """DNS resolution check, bounded by ``timeout`` seconds. Never raises."""
+    return _run(_dns_lookup, domain, timeout=timeout, what="DNS")
+
+
+def overall_status(whois_result: dict[str, Any], dns_result: dict[str, Any]) -> str:
+    """Combine both lookups into "taken", "available" or "unknown".
+
+    Either lookup finding the domain is proof it's taken. Otherwise WHOIS is the
+    authority: plenty of registered domains have no DNS records, so if WHOIS
+    failed we can't call the domain available.
+    """
+    if whois_result.get("status") == "taken" or dns_result.get("status") == "taken":
+        return "taken"
+    if whois_result.get("status") in FAILED_STATUSES:
+        return "unknown"
+    return "available"
+
+
+def is_cacheable(result: dict[str, Any]) -> bool:
+    """Only cache definitive answers; a timeout or error should be retried."""
+    return (
+        result["whois"].get("status") not in FAILED_STATUSES
+        and result["dns"].get("status") not in FAILED_STATUSES
+    )
+
+
+def check_domains(
+    domains: Iterable[str],
+    whois_timeout: float = DEFAULT_WHOIS_TIMEOUT,
+    dns_timeout: float = DEFAULT_DNS_TIMEOUT,
+) -> dict[str, dict[str, Any]]:
+    """Check many fully-qualified domains concurrently.
+
+    Every WHOIS and DNS lookup is started at once, so total latency is bounded by
+    the slowest timeout rather than the sum of all lookups.
+    """
+    start = time.monotonic()
+    pending = {
+        domain: (
+            _executor.submit(_whois_lookup, domain, whois_timeout),
+            _executor.submit(_dns_lookup, domain),
+        )
+        for domain in dict.fromkeys(domains)  # de-duplicate, keep order
+    }
+
+    results: dict[str, dict[str, Any]] = {}
+    for domain, (whois_future, dns_future) in pending.items():
+        whois_result = _collect(whois_future, start + whois_timeout, "WHOIS")
+        dns_result = _collect(dns_future, start + dns_timeout, "DNS")
+        results[domain] = {
+            "domain": domain,
+            "status": overall_status(whois_result, dns_result),
+            "whois": whois_result,
+            "dns": dns_result,
+            "tld": domain.rsplit(".", 1)[-1],
+        }
+    return results
