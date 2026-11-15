@@ -37,11 +37,31 @@ _DNS_NOT_FOUND_CODES = frozenset(
     if code is not None
 )
 
+DEFAULT_LOOKUP_WORKERS = 32
+
+
+def lookup_workers_from_env() -> int:
+    """LOOKUP_WORKERS, falling back to the default (with a warning) if invalid."""
+    raw = os.environ.get("LOOKUP_WORKERS", "").strip()
+    if not raw:
+        return DEFAULT_LOOKUP_WORKERS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning(
+            "Ignoring invalid LOOKUP_WORKERS=%r, using default %d", raw, DEFAULT_LOOKUP_WORKERS
+        )
+        return DEFAULT_LOOKUP_WORKERS
+    return value
+
+
 # One shared pool for all lookups. WHOIS and DNS calls are blocking I/O and can't be
 # cancelled once started, so a shared pool bounds the number of in-flight lookups
 # instead of spawning (and then waiting on) a fresh pool per call.
 _executor = ThreadPoolExecutor(
-    max_workers=max(1, int(os.environ.get("LOOKUP_WORKERS", "32") or 32)),
+    max_workers=lookup_workers_from_env(),
     thread_name_prefix="domain-lookup",
 )
 
@@ -149,7 +169,9 @@ def _whois_lookup(domain: str, timeout: float = DEFAULT_WHOIS_TIMEOUT) -> dict[s
 
 def _dns_lookup(domain: str) -> dict[str, Any]:
     try:
-        infos = socket.getaddrinfo(domain, None, proto=socket.IPPROTO_TCP)
+        # Trailing dot = absolute name, so the resolver never tries the host's search
+        # domains (extra queries, and a wildcard there would look like "taken").
+        infos = socket.getaddrinfo(domain.rstrip(".") + ".", None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         if exc.errno in _DNS_NOT_FOUND_CODES:
             return {"status": "available"}

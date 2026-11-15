@@ -167,6 +167,32 @@ def test_dns_ipv6_only_is_taken(monkeypatch):
     assert domain_mod._dns_lookup("x.com") == {"status": "taken", "ip": "2001:db8::1"}
 
 
+def test_dns_queries_absolute_name(monkeypatch):
+    """A trailing dot stops the resolver from trying the host's search domains."""
+    seen = []
+
+    def fake(host, *args, **kwargs):
+        seen.append(host)
+        raise socket.gaierror(socket.EAI_NONAME, "nope")
+
+    monkeypatch.setattr(domain_mod.socket, "getaddrinfo", fake)
+    domain_mod._dns_lookup("example.com")
+    domain_mod._dns_lookup("example.com.")
+    assert seen == ["example.com.", "example.com."]
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [(None, 32), ("", 32), ("64", 64), (" 8 ", 8), ("abc", 32), ("0", 32), ("-4", 32)],
+)
+def test_lookup_workers_from_env(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("LOOKUP_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("LOOKUP_WORKERS", raw)
+    assert domain_mod.lookup_workers_from_env() == expected
+
+
 def test_check_dns_timeout_returns_dict(monkeypatch):
     monkeypatch.setattr(domain_mod, "_dns_lookup", lambda d: time.sleep(0.5) or {"status": "available"})
     assert check_dns("slow.com", timeout=0.05)["status"] == "timeout"

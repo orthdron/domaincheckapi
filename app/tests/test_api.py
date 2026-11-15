@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.docs.routes import generate_openapi_spec
+from app.docs.routes import SWAGGER_UI_VERSION, generate_openapi_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -268,6 +268,14 @@ def test_daily_limit_is_shared_across_endpoints(make_app, lookups):
     assert client.get("/?domain=google").status_code == 429
 
 
+def test_rate_limit_store_outage_lets_requests_through(make_app, lookups):
+    """With Redis unreachable, checks must keep working instead of returning 500."""
+    app = make_app(RATELIMIT_ENABLED=True, RATELIMIT_STORAGE_URI="redis://127.0.0.1:1")
+    response = app.test_client().get("/?domain=google")
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "taken"
+
+
 def test_rate_limits_are_off_by_default(client):
     for _ in range(15):
         assert client.get("/?domain=google").status_code == 200
@@ -281,6 +289,8 @@ def test_openapi_endpoint(client):
     spec = client.get("/openapi.json").get_json()
     assert spec["info"]["title"] == "Domain Check API"
     assert {"/", "/bulk", "/health", "/metrics"} <= set(spec["paths"])
+    # "Try it out" must target the server showing the docs, not production.
+    assert spec["servers"][0]["url"] == "/"
 
 
 def test_committed_openapi_json_is_up_to_date():
@@ -290,7 +300,11 @@ def test_committed_openapi_json_is_up_to_date():
     )
 
 
-def test_docs_page(client):
+def test_docs_page_pins_swagger_ui_with_integrity(client):
     response = client.get("/docs")
     assert response.status_code == 200
-    assert b"swagger-ui" in response.data
+    html = response.get_data(as_text=True)
+    assert f"swagger-ui-dist@{SWAGGER_UI_VERSION}/" in html
+    assert "swagger-ui-dist@5/" not in html
+    assert html.count('integrity="sha384-') == 2
+    assert html.count('crossorigin="anonymous"') == 2

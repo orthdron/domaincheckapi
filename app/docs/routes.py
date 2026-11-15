@@ -45,7 +45,11 @@ def generate_openapi_spec() -> dict:
             )
         ),
         plugins=[MarshmallowPlugin()],
-        servers=[{"url": "https://domains.fiodel.com", "description": "Production server"}]
+        servers=[
+            # Relative first, so "Try it out" hits whichever server is showing the docs.
+            {"url": "/", "description": "This server"},
+            {"url": "https://domains.fiodel.com", "description": "Production server"},
+        ]
     )
 
     # Add schemas
@@ -205,32 +209,43 @@ def openapi_spec():
     # Served from code so it can never drift from the running API.
     return jsonify(generate_openapi_spec())
 
+# Pinned Swagger UI with Subresource Integrity, so a CDN or npm compromise can't
+# change what /docs runs. To upgrade: bump the version and recompute both hashes
+# (openssl dgst -sha384 -binary FILE | openssl base64 -A).
+SWAGGER_UI_VERSION = "5.34.1"
+_SWAGGER_UI_CDN = f"https://cdn.jsdelivr.net/npm/swagger-ui-dist@{SWAGGER_UI_VERSION}"
+_SWAGGER_UI_CSS_SRI = "sha384-4c3vsE5f+trhFyHrFrLM1fFGUn531NIaC7dcqEWIJdoRQJ5CkJbSuSCwXLpaS1KF"
+_SWAGGER_UI_JS_SRI = "sha384-XFYN47VzPiDY6qPtxYKg0nqUeW/upo20xf1j2SUE7gT/i35FJB4cuS/71Iegzk8Z"
+
+DOCS_HTML = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Domain Check API - Documentation</title>
+    <link rel="stylesheet" href="{_SWAGGER_UI_CDN}/swagger-ui.css"
+          integrity="{_SWAGGER_UI_CSS_SRI}" crossorigin="anonymous">
+    <link rel="icon" type="image/png" href="https://swagger.io/favicon.png">
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="{_SWAGGER_UI_CDN}/swagger-ui-bundle.js"
+            integrity="{_SWAGGER_UI_JS_SRI}" crossorigin="anonymous"></script>
+    <script>
+        window.onload = function() {{
+            SwaggerUIBundle({{
+                url: '/openapi.json',
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [SwaggerUIBundle.presets.apis],
+            }});
+        }};
+    </script>
+</body>
+</html>
+"""
+
+
 @docs_bp.route('/docs')
 def docs():
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Domain Check API - Documentation</title>
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
-        <link rel="icon" type="image/png" href="https://swagger.io/favicon.png">
-    </head>
-    <body>
-        <div id="swagger-ui"></div>
-        <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-        <script>
-            window.onload = function() {{
-                SwaggerUIBundle({{
-                    url: '/openapi.json',
-                    dom_id: '#swagger-ui',
-                    deepLinking: true,
-                    presets: [
-                        SwaggerUIBundle.presets.apis,
-                        SwaggerUIBundle.SwaggerUIStandalonePreset
-                    ],
-                }});
-            }}
-        </script>
-    </body>
-    </html>
-    """
+    return DOCS_HTML

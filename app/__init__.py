@@ -71,6 +71,9 @@ def load_config() -> dict[str, Any]:
         "RATELIMIT_ENABLED": _env_bool("ENABLE_RATE_LIMITS", False),
         "RATELIMIT_STORAGE_URI": _env_str("REDIS_URL") or "memory://",
         "RATELIMIT_HEADERS_ENABLED": True,
+        # If the rate-limit store (Redis) is unreachable, let requests through
+        # instead of failing every check with a 500.
+        "RATELIMIT_SWALLOW_ERRORS": True,
         "RATE_LIMIT_SINGLE": _env_number("RATE_LIMIT_SINGLE", 10),
         "RATE_LIMIT_BULK": _env_number("RATE_LIMIT_BULK", 5),
         "RATE_LIMIT_DAILY": _env_number("RATE_LIMIT_DAILY", 100),
