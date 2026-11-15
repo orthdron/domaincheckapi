@@ -268,12 +268,20 @@ def test_daily_limit_is_shared_across_endpoints(make_app, lookups):
     assert client.get("/?domain=google").status_code == 429
 
 
-def test_rate_limit_store_outage_lets_requests_through(make_app, lookups):
-    """With Redis unreachable, checks must keep working instead of returning 500."""
-    app = make_app(RATELIMIT_ENABLED=True, RATELIMIT_STORAGE_URI="redis://127.0.0.1:1")
-    response = app.test_client().get("/?domain=google")
-    assert response.status_code == 200
-    assert response.get_json()["status"] == "taken"
+def test_rate_limits_still_apply_when_store_is_down(make_app, lookups):
+    """With Redis unreachable, checks keep working (no 500s) and limits still hold."""
+    app = make_app(
+        RATELIMIT_ENABLED=True,
+        RATELIMIT_STORAGE_URI="redis://127.0.0.1:1",
+        RATE_LIMIT_SINGLE=2,
+    )
+    client = app.test_client()
+
+    first = client.get("/?domain=google")
+    assert first.status_code == 200
+    assert first.get_json()["status"] == "taken"
+    assert client.get("/?domain=google").status_code == 200
+    assert client.get("/?domain=google").status_code == 429
 
 
 def test_rate_limits_are_off_by_default(client):

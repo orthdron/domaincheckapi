@@ -198,7 +198,7 @@ Two caching backends are available:
 - Overall: 100 checks per day (single and bulk share this budget)
 - Health, metrics and docs endpoints: unlimited
 - Exceeding a limit returns `429` with a JSON error body and `Retry-After`/`X-RateLimit-*` headers
-- If the rate-limit store (Redis) is unreachable, requests are allowed through rather than failing
+- If the rate-limit store (Redis) is unreachable, the same limits are enforced in each process's memory until it recovers (so with several workers the effective limit is looser), rather than failing requests
 
 Behind a reverse proxy (Railway, Dokploy, nginx), set `TRUSTED_PROXY_COUNT=1` so limits apply per client rather than to the proxy's IP. Leave it at `0` when the app is exposed directly, otherwise clients could spoof `X-Forwarded-For`.
 

@@ -71,8 +71,11 @@ def load_config() -> dict[str, Any]:
         "RATELIMIT_ENABLED": _env_bool("ENABLE_RATE_LIMITS", False),
         "RATELIMIT_STORAGE_URI": _env_str("REDIS_URL") or "memory://",
         "RATELIMIT_HEADERS_ENABLED": True,
-        # If the rate-limit store (Redis) is unreachable, let requests through
-        # instead of failing every check with a 500.
+        # If the rate-limit store (Redis) is unreachable, keep enforcing the same
+        # limits in process memory until it recovers (per worker, so looser with
+        # several workers) rather than failing every check with a 500 or dropping
+        # limits entirely. Swallowing errors is only a last-resort backstop.
+        "RATELIMIT_IN_MEMORY_FALLBACK_ENABLED": True,
         "RATELIMIT_SWALLOW_ERRORS": True,
         "RATE_LIMIT_SINGLE": _env_number("RATE_LIMIT_SINGLE", 10),
         "RATE_LIMIT_BULK": _env_number("RATE_LIMIT_BULK", 5),
